@@ -1,7 +1,7 @@
 # minimal set of packages to run tests (under tox, for example)
 -r import_tests.txt
 
-virtualenv<20
+virtualenv>=20
 pytest-xdist
 
 pypiserver

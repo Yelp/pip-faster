@@ -112,7 +112,7 @@ def download_sdist(source, destination):
 
 def do_build(sources, destination):
     build_all(sources, destination)
-    wheel('virtualenv<20', destination)
+    wheel('virtualenv>=20', destination)
     wheel('coverage-enable-subprocess', destination)
     download_sdist('coverage', destination)
     download_sdist('coverage-enable-subprocess', destination)

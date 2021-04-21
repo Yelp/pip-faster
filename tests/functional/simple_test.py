@@ -79,11 +79,14 @@ def test_arguments_system_packages(tmpdir):
     requirements('')
 
     venv_update('venv=', '--system-site-packages', 'venv')
-
+    # virtualenv>20 doesn't set sys.real_prefix anymore. The accepted method
+    # for checking if we are in a virtual environment is to check for base_prefix
+    # See: https://github.com/pypa/virtualenv/issues/1622
     out, err = run('venv/bin/python', '-c', '''\
 import sys
+non_venv_prefix = sys.real_prefix if hasattr(sys, "real_prefix") else sys.base_prefix
 for p in sys.path:
-    if p.startswith(sys.real_prefix) and p.endswith("-packages"):
+    if p.startswith(non_venv_prefix) and p.endswith("-packages"):
         print(p)
         break
 ''')
@@ -233,10 +236,9 @@ def pipe_output(read, write):
     assert uncolored.startswith('> ')
     # FIXME: Sometimes this is 'python -m', sometimes 'python2.7 -m'. Weird.
     import virtualenv
-    assert uncolored.endswith('''
-> virtualenv --version
-%s
-''' % virtualenv.__version__)
+    split_uncolored = uncolored.strip().split('\n')
+    version_cmd_index = split_uncolored.index('> virtualenv --version')
+    assert 'virtualenv {}'.format(virtualenv.__version__) in split_uncolored[version_cmd_index+1]
 
     return result, uncolored
 
@@ -276,19 +278,13 @@ def test_args_backward(tmpdir):
 
     with pytest.raises(CalledProcessError) as excinfo:
         venv_update('venv=', 'requirements.txt')
-
-    assert excinfo.value.returncode == 3
+    assert excinfo.value.returncode == 2
     out, err = excinfo.value.result
     err = strip_coverage_warnings(err)
     err = strip_pip_warnings(err)
-    assert err == ''
     out = uncolor(out)
-    assert out.rsplit('\n', 4)[-4:] == [
-        '> virtualenv requirements.txt',
-        'ERROR: File already exists and is not a directory.',
-        'Please provide a different path or delete the file.',
-        '',
-    ]
+    assert '> virtualenv requirements.txt' in out
+    assert 'virtualenv: error: argument dest: the destination requirements.txt already exists and is a file' in err
 
     assert Path('requirements.txt').isfile()
     assert Path('requirements.txt').read() == ''

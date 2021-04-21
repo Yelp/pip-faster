@@ -71,7 +71,7 @@ from subprocess import CalledProcessError
 # To fix this we just delete the environment variable.
 os.environ.pop('__PYVENV_LAUNCHER__', None)
 
-__version__ = '3.2.4'
+__version__ = '4.0.0'
 DEFAULT_VIRTUALENV_PATH = 'venv'
 DEFAULT_OPTION_VALUES = {
     'venv=': (DEFAULT_VIRTUALENV_PATH,),
@@ -208,13 +208,12 @@ def exec_scratch_virtualenv(args):
     if not exists(scratch.python):
         run(('virtualenv', scratch.venv))
 
-    if not exists(join(scratch.src, 'virtualenv.py')):
+    if not exists(join(scratch.src, 'virtualenv')):
         scratch_python = venv_python(scratch.venv)
         # TODO: do we allow user-defined override of which version of virtualenv to install?
         # https://github.com/Yelp/venv-update/issues/231 virtualenv 20+ is not supported.
         tmp = scratch.src + '.tmp'
-        run((scratch_python, '-m', 'pip.__main__', 'install', 'virtualenv<20', '--target', tmp))
-
+        run((scratch_python, '-m', 'pip.__main__', 'install', 'virtualenv>=20', '--target', tmp))
         from os import rename
         rename(tmp, scratch.src)
 
@@ -235,25 +234,13 @@ def get_original_path(venv_path):  # TODO-TEST: a unit test
     return check_output(('sh', '-c', '. %s; printf "$VIRTUAL_ENV"' % venv_executable(venv_path, 'activate')))
 
 
-def has_system_site_packages(interpreter):
-    # TODO: unit-test
-    system_site_packages = check_output((
-        interpreter,
-        '-c',
-        # stolen directly from virtualenv's site.py
-        """\
-import site, os.path
-print(
-    0
-    if os.path.exists(
-        os.path.join(os.path.dirname(site.__file__), 'no-global-site-packages.txt')
-    ) else
-    1
-)"""
-    ))
-    system_site_packages = int(system_site_packages)
-    assert system_site_packages in (0, 1)
-    return bool(system_site_packages)
+def has_system_site_packages(venv_path):
+    from pathlib import Path
+    from virtualenv.create.pyenv_cfg import PyEnvCfg
+    pyenv_cfg = PyEnvCfg.from_folder(Path(venv_path))
+    include_system_site_packages = pyenv_cfg['include-system-site-packages']
+    assert include_system_site_packages in ('true', 'false')
+    return True if include_system_site_packages == 'true' else False
 
 
 def get_python_version(interpreter):
@@ -264,15 +251,15 @@ def get_python_version(interpreter):
     return check_output(cmd)
 
 
-def invalid_virtualenv_reason(venv_path, source_python, destination_python, options):
+def invalid_virtualenv_reason(venv_path, source_python, destination_python, virtualenv_system_site_packages):
     try:
         orig_path = get_original_path(venv_path)
     except CalledProcessError:
         return 'could not inspect metadata'
     if not samefile(orig_path, venv_path):
         return 'virtualenv moved {} -> {}'.format(timid_relpath(orig_path), timid_relpath(venv_path))
-    elif has_system_site_packages(destination_python) != options.system_site_packages:
-        return 'system-site-packages changed, to %s' % options.system_site_packages
+    elif has_system_site_packages(venv_path) != virtualenv_system_site_packages:
+        return 'system-site-packages changed, to %s' % virtualenv_system_site_packages
 
     if source_python is None:
         return
@@ -284,42 +271,49 @@ def invalid_virtualenv_reason(venv_path, source_python, destination_python, opti
 
 def ensure_virtualenv(args, return_values):
     """Ensure we have a valid virtualenv."""
-    def adjust_options(options, args):
-        # TODO-TEST: proper error message with no arguments
-        venv_path = return_values.venv_path = args[0]
 
-        if venv_path == DEFAULT_VIRTUALENV_PATH or options.prompt == '<dirname>':
+    from sys import argv
+    argv[:] = ('virtualenv',) + args
+    info(colorize(argv))
+
+    import virtualenv
+
+    run_virtualenv = True
+    filtered_args = [a for a in args if not a.startswith('-')]
+    if filtered_args:
+        venv_path = return_values.venv_path = filtered_args[0] if filtered_args else None
+        if venv_path == DEFAULT_VIRTUALENV_PATH:
             from os.path import abspath, basename, dirname
-            options.prompt = '(%s)' % basename(dirname(abspath(venv_path)))
-        # end of option munging.
+            args = ('--prompt=({})'.format(basename(dirname(abspath(venv_path)))),) + args
 
+        # Validate existing virtualenv if there is one
         # there are two python interpreters involved here:
         # 1) the interpreter we're instructing virtualenv to copy
-        if options.python is None:
+        python_options_arg = [a for a in args if a.startswith('-p') or a.startswith('--python')]
+        if not python_options_arg:
             source_python = None
         else:
-            source_python = virtualenv.resolve_interpreter(options.python)
+            virtualenv_session = virtualenv.session_via_cli(args)
+            source_python = virtualenv_session._interpreter.executable
         # 2) the interpreter virtualenv will create
         destination_python = venv_python(venv_path)
 
         if exists(destination_python):
-            reason = invalid_virtualenv_reason(venv_path, source_python, destination_python, options)
+            # Check if --system-site-packages is a passed-in option
+            dummy_session = virtualenv.session_via_cli(args)
+            virtualenv_system_site_packages = dummy_session.creator.enable_system_site_package
+
+            reason = invalid_virtualenv_reason(venv_path, source_python, destination_python, virtualenv_system_site_packages)
             if reason:
                 info('Removing invalidated virtualenv. (%s)' % reason)
                 run(('rm', '-rf', venv_path))
             else:
                 info('Keeping valid virtualenv from previous run.')
-                raise SystemExit(0)  # looks good! we're done here.
+                run_virtualenv = False  # looks good! we're done here.
 
-    # this is actually a documented extension point:
-    #   http://virtualenv.readthedocs.org/en/latest/reference.html#adjust_options
-    import virtualenv
-    virtualenv.adjust_options = adjust_options
+    if run_virtualenv:
+        raise_on_failure(lambda: virtualenv.cli_run(args), ignore_return=True)
 
-    from sys import argv
-    argv[:] = ('virtualenv',) + args
-    info(colorize(argv))
-    raise_on_failure(virtualenv.main)
     # There might not be a venv_path if doing something like "venv= --version"
     # and not actually asking virtualenv to make a venv.
     if return_values.venv_path is not None:
@@ -436,11 +430,11 @@ def pip_faster(venv_path, pip_command, install, bootstrap_deps):
     run(pip_command + install)
 
 
-def raise_on_failure(mainfunc):
+def raise_on_failure(mainfunc, ignore_return=False):
     """raise if and only if mainfunc fails"""
     try:
         errors = mainfunc()
-        if errors:
+        if not ignore_return and errors:
             exit(errors)
     except CalledProcessError as error:
         exit(error.returncode)

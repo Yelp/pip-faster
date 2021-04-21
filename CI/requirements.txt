@@ -1,4 +1,4 @@
 # minimal set of packages for github actions to run our test suites
 codecov
 tox==3.21.2
-virtualenv<20
+virtualenv>=20
